@@ -1,0 +1,21 @@
+# Build artifacts
+*.o
+*.ko
+*.mod*
+*.cmd
+.*.cmd
+*.order
+*.symvers
+.tmp_versions/
+
+# Binaries
+empty
+part1
+consumer
+producer
+test-syscalls
+test_syscalls
+
+# Editor files
+*.swp
+*~
