@@ -3,6 +3,8 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/timekeeping.h>
+#include <linux/mutex.h>
+
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("cop4610t");
@@ -19,6 +21,9 @@ static struct proc_dir_entry* timer_entry;
 static struct timespec64 last_time;
 static int first_read = 1;
 
+// Mutex prtoect
+static DEFINE_MUTEX(timer_lock);
+
 // Called whenever /proc/timer is read
 static ssize_t timer_read(struct file *file, char __user *ubuf, size_t count, loff_t *ppos)
 {
@@ -31,6 +36,9 @@ static ssize_t timer_read(struct file *file, char __user *ubuf, size_t count, lo
     if (*ppos > 0) {
         return 0;
     }
+
+    // Lock before accessing shared variables
+    mutex_lock(&timer_lock);
 
     // Get current time in seconds and nanoseconds
     ktime_get_real_ts64(&current_time);
@@ -56,6 +64,9 @@ static ssize_t timer_read(struct file *file, char __user *ubuf, size_t count, lo
     // Save current time for next read
     last_time = current_time;
     first_read = 0;
+
+    // Unlock after updating shared variables
+    mutex_unlock(&timer_lock);
 
     // Send buffer contents to user
     return simple_read_from_buffer(ubuf, count, ppos, buf, len); // better than copy_from_user
