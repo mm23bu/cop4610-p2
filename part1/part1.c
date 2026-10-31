@@ -1,13 +1,11 @@
 
 #include <unistd.h>
 
-int main(void)
+int main()
 {
     getpid();
-    getppid();
+    sync();
     getuid();
-    geteuid();
-    getgid();
-
-    return 0;
+    dup(0);
+    alarm(0);
 }
