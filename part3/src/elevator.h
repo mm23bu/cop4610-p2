@@ -12,9 +12,16 @@
 #define UP      3
 #define DOWN    4
 
+#define NUM_FLOORS 5
+
 struct elevator_data {
     int state;
+    int current_floor;
+    int current_weight;
+    int total_pets_serviced;
+    int total_weight_serviced;
     int stop_requested;
+    int floor_wait_count[NUM_FLOORS];
     struct mutex lock;
 };
 

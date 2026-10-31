@@ -1,6 +1,8 @@
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/mutex.h>
 #include "elevator.h"
 
@@ -70,13 +72,67 @@ int elevator_stop(void)
     return 0;
 }
 
+/*PROCFS Operations */
+
+static int elevator_proc_show(struct seq_file *m, void *v)
+{
+    int i;
+
+    mutex_lock(&elevator.lock);
+
+    seq_printf(m, "Elevator state: %s\n", get_state_string(elevator.state));
+    seq_printf(m, "Current floor: %d\n", elevator.current_floor);
+    seq_printf(m, "Current load: %d lbs\n", elevator.current_weight);
+    seq_printf(m, "Elevator status: \n\n");
+
+    /* print floors descending: 5 down to 1 */
+    for (i = NUM_FLOORS; i >= 1; i--) {
+        char marker = (elevator.current_floor == i) ? '*' : ' ';
+        seq_printf(m, "[%c] Floor %d: %d\n", marker, i, elevator.floor_wait_count[i - 1]);
+    }
+
+    seq_printf(m, "\nNumber of pets serviced: %d\n", elevator.total_pets_serviced);
+    seq_printf(m, "Total weight serviced: %d lbs\n", elevator.total_weight_serviced);
+
+    mutex_unlock(&elevator.lock);
+    return 0;
+}
+
+static int elevator_proc_open(struct inode *inode, struct file *file)
+{
+    return single_open(file, elevator_proc_show, NULL);
+}
+
+static const struct proc_ops elevator_proc_ops = {
+    .proc_open    = elevator_proc_open,
+    .proc_read    = seq_read,
+    .proc_lseek   = seq_lseek,
+    .proc_release = single_release,
+};
+
 /* MODULE LIFECYCLE */
 
 static int __init elevator_init(void)
 {
+    int i;
+
     mutex_init(&elevator.lock);
     elevator.state = OFFLINE;
+    elevator.current_floor = 1;
+    elevator.current_weight = 0;
+    elevator.total_pets_serviced = 0;
+    elevator.total_weight_serviced = 0;
     elevator.stop_requested = 0;
+
+    for (i = 0; i < NUM_FLOORS; i++){
+        elevator.floor_wait_count[i] = 0;
+    }
+
+    /* register /proc/elevator */
+    if (!proc_create(ENTRY_NAME, PERMS, NULL, &elevator_proc_ops)) {
+        pr_err("elevator: failed to create /proc/%s\n", ENTRY_NAME);
+        return -ENOMEM;
+    }
 
     /* hook the start and stop stubs */
     STUB_start_elevator = elevator_start;
