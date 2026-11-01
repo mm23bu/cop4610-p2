@@ -372,9 +372,9 @@ static int elevator_proc_show(struct seq_file *m, void *v)
         seq_putc(m, '\n');
     }
 
-    seq_printf(m, "\nNumber of passengers: %d\n", elevator.current_pets);
-    seq_printf(m, "Number of passengers waiting: %d\n", elevator.total_waiting);
-    seq_printf(m, "Number of passengers serviced: %d\n", elevator.total_pets_serviced);
+    seq_printf(m, "\nNumber of pets: %d\n", elevator.current_pets);
+    seq_printf(m, "Number of pets waiting: %d\n", elevator.total_waiting);
+    seq_printf(m, "Number of pets serviced: %d\n", elevator.total_pets_serviced);
 
     mutex_unlock(&elevator.lock);
     return 0;
