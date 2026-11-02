@@ -299,9 +299,10 @@ Each member records their contributions here.
 
 | Date       | Work Completed / Notes |
 |------------|------------------------|
-| YYYY-MM-DD | [Description of task]  |
-| YYYY-MM-DD | [Description of task]  |
-| YYYY-MM-DD | [Description of task]  |
+| 2026-10-08 | initialized Github repository and basic file architecture.  |
+| 2026-10-28 | implemented syscalls.c with stubs for syscalls and added elevator module scaffold. |
+| 2026-10-29 | added elevator start/stop stubs with OFFLINE/IDLE state tracking and mutex protection. |
+| 2026-10-30 | added proc/elevator interface showing elevator state, current floor, load, and waiting counts. |
 
 
 ## Meetings
