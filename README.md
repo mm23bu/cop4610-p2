@@ -279,9 +279,8 @@ Each member records their contributions here.
 
 | Date       | Work Completed / Notes |
 |------------|------------------------|
-| YYYY-MM-DD | [Description of task]  |
-| YYYY-MM-DD | [Description of task]  |
-| YYYY-MM-DD | [Description of task]  |
+| 2026-10-18 | Worked on Part 2 timer kernel module  |
+| 2026-11-01 | Worked on Part 3 scheduling algorithm  |
 
 ### Dhruv Patel
 
