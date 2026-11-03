@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/delay.h>
 #include <linux/err.h>
+#include <linux/errno.h>
 #include "elevator.h"
 
 MODULE_LICENSE("GPL");
@@ -18,6 +19,7 @@ MODULE_DESCRIPTION("Elevator module scaffold");
 // Time travel one floor and load/unload passenger
 #define TRAVEL_MS 2000
 #define LOADING_MS 1000
+#define IDLE_POLL_MS 100
 
 // Pet weights and letters correspond to enum in .h
 static const int pet_weights[PET_TYPE_COUNT] = {3, 14, 10, 16};
@@ -25,6 +27,9 @@ static const char pet_letters[PET_TYPE_COUNT] = {'C', 'P', 'H', 'D'};
 
 struct elevator_data elevator;
 static struct proc_dir_entry *elevator_entry;
+
+// 1 = up, -1 = down, 0 = no direction
+static int travel_direction;
 
 /* state helper */ 
 static const char *get_state_string(int state)
@@ -41,52 +46,45 @@ static const char *get_state_string(int state)
 
 // LINKED LIST FUNCTIONS
 
-// Check if there pets waiting on any floor
-static bool has_waiting_pets(void) {
-    int i;
-    for (i = 0; i < NUM_FLOORS; i++)
-        if (!list_empty(&elevator.waiting[i]))
-            return true;
-    return false;
-}
-
 // Remove pets that have reached destination
 static bool unload_pets(void) {
     struct pet *p;
     struct pet *tmp;
     bool unloaded = false;
 
+    // Safe, allow pets to be removed
     list_for_each_entry_safe(p, tmp, &elevator.onboard, node) {
-        if (p->dest_floor == elevator.current_floor) {
-            // Remove pet from onboard list
-            list_del(&p->node);
-            // Update elevator info
-            elevator.current_pets--;
-            elevator.current_weight -= p->weight;
-            elevator.total_pets_serviced++;
-            elevator.total_weight_serviced += p->weight;
-            // Free dynamic alloc memy
-            kfree(p);
+        if (p->dest_floor != elevator.current_floor)
+            continue;
 
-            unloaded = true;
-        }
+        // Remove pet from onboard list
+        list_del(&p->node);
+
+        // Update elevator info adn counters
+        elevator.current_pets--;
+        elevator.current_weight -= p->weight;
+        elevator.total_pets_serviced++;
+        elevator.total_weight_serviced += p->weight;
+        
+        // Free dynamic alloc memy
+        kfree(p);
+        unloaded = true;
     }
     return unloaded;
 }
 
+
 // Move pets from current floor waiting list into elevator onboard list (FIFO)
 static bool board_pets(void) {
-    int index = elevator.current_floor - 1;
+    struct list_head *queue = &elevator.waiting[elevator.current_floor - 1];
     struct pet *p;
     bool boarded = false;
 
-    while (!list_empty(&elevator.waiting[index])) {
-        // Elevator cannot carry more than 5 pets
-        if (elevator.current_pets >= MAX_PETS)
-            break;
+    // Max carry is 5 pets
+    while (!list_empty(queue) && elevator.current_pets < MAX_PETS) {
 
         // Get first pet in waiting list
-        p = list_first_entry(&elevator.waiting[index], struct pet, node);
+        p = list_first_entry(queue, struct pet, node);
 
         // Elevator cannot exceed 50 pounds
         if (elevator.current_weight + p->weight > MAX_WEIGHT)
@@ -94,10 +92,10 @@ static bool board_pets(void) {
 
         // Move pet to onbaord list
         list_move_tail(&p->node, &elevator.onboard);
-        // Update waiting info
-        elevator.floor_wait_count[index]--;
+        
+        // Update waiting info and onboard counts
+        elevator.floor_wait_count[elevator.current_floor - 1]--;
         elevator.total_waiting--;
-        // Update current elevator load
         elevator.current_pets++;
         elevator.current_weight += p->weight;
 
@@ -106,22 +104,75 @@ static bool board_pets(void) {
     return boarded;
 }
 
-// Find next floor for thread to visit
-// TEMP , will change for scheduling alogirthm
-static int choose_next_floor(void) {
+// Check if a floor has pets to unload or room for a pickup
+static bool floor_needs_stop(int floor) {
     struct pet *p;
-    int i;
+    struct list_head *queue;
 
-    if (!list_empty(&elevator.onboard)) {
-        p = list_first_entry(&elevator.onboard, struct pet, node);
-        return p->dest_floor;
+    // Check if any onboard pet needs to get off
+    list_for_each_entry(p, &elevator.onboard, node) {
+        if (p->dest_floor == floor)
+            return true;
     }
 
-    for (i = 0; i < NUM_FLOORS; i++) {
-        if (!list_empty(&elevator.waiting[i]))
-            return i + 1;
+    // Do not pick up new pets during shutdown or full
+    if (elevator.stop_requested || elevator.current_pets >= MAX_PETS)
+        return false;
+
+    queue = &elevator.waiting[floor - 1];
+    if (list_empty(queue))
+        return false;
+
+    // Check the first pet to preserve FIFO
+    p = list_first_entry(queue, struct pet, node);
+
+    return elevator.current_weight + p->weight <= MAX_WEIGHT;
+}
+
+// LOOK scheduling, find nearest useful stop in current direction, reverse when no stops remain ahead
+static int choose_next_floor(void) {
+    int floor, distance;
+    int here = elevator.current_floor;
+
+    if (travel_direction > 0) {
+        // Continue upward
+        for (floor = here + 1; floor <= NUM_FLOORS; floor++) {
+            if (floor_needs_stop(floor))
+                return floor;
+        }
+
+        // Reverse downward if no stops remain above
+        for (floor = here - 1; floor >= 1; floor--) {
+            if (floor_needs_stop(floor))
+                return floor;
+        }
+    }else if (travel_direction < 0) {
+        // Continue downward
+        for (floor = here - 1; floor >= 1; floor--) {
+            if (floor_needs_stop(floor))
+                return floor;
+        }
+
+        // Reverse upward if no stop remain below
+        for (floor = here + 1; floor <= NUM_FLOORS; floor++) {
+            if (floor_needs_stop(floor))
+                return floor;
+        }
+    } else {
+        // Initially choose the closest available stop
+        for (distance = 1; distance < NUM_FLOORS; distance++) {
+            floor = here + distance;
+
+            if (floor <= NUM_FLOORS && floor_needs_stop(floor))
+                return floor;
+            floor = here - distance;
+
+            if (floor >= 1 && floor_needs_stop(floor))
+                return floor;
+        }
     }
-    return elevator.current_floor;
+    // Remain on current floor if no stop is found
+    return here;
 }
 
 
@@ -138,140 +189,122 @@ static int choose_next_floor(void) {
 */
 static int elevator_thread(void *unused) {
    while (!kthread_should_stop()) {
-       int target;
-       bool changed = false;
-       int delay_ms = 100;
+       int target, direction;
+       bool changed, moving;
        
        mutex_lock(&elevator.lock);
 
-       switch(elevator.state) {
-        case OFFLINE:
-            // Stay inactive until elevator_start(), change state to IDLE
-            delay_ms = 100;
-            break;
-        
-        case IDLE:
-        case LOADING:
-            // Process pets at current floor, both cases use same
-
-            // Unload first
-            if (unload_pets())
-                changed = true;
-
-            // Do not board new pets while stopping
-            if (!elevator.stop_requested) {
-                if (board_pets())
-                    changed = true;
-            }
-
-            // If boading or unloaded occured, stay LOADING for 1 sec, change to IDLE after delay
-            if (changed) {
-                elevator.state = LOADING;
-
-                mutex_unlock(&elevator.lock);
-                msleep_interruptible(LOADING_MS);
-
-                if (kthread_should_stop())
-                    return 0;
-                mutex_lock(&elevator.lock);
-
-                // Only worker tranitions away from LOADING during normal service
-                if (elevator.state == LOADING)
-                    elevator.state = IDLE;
-
-                mutex_unlock(&elevator.lock);
-                continue;
-            }
-
-            // Complete a stop only after every onboard pet has been delivered
-            if (elevator.stop_requested && list_empty(&elevator.onboard)) {
-                elevator.state = OFFLINE;
-                elevator.stop_requested = 0;
-                break;
-            }
-
-            // Become IDLE when there is no work
-            if (list_empty(&elevator.onboard) && !has_waiting_pets()) {
-                elevator.state = IDLE;
-                delay_ms = 100;
-                break;
-            }
-
-            // Choose next destination
-            target = choose_next_floor();
-            if (target > elevator.current_floor)
-                elevator.state = UP;
-            else if (target < elevator.current_floor)
-                elevator.state = DOWN;
-            else
-                elevator.state = IDLE;
-
-            delay_ms = 100;
-            break;
-
-        
-        case UP:
-            mutex_unlock(&elevator.lock);
-            msleep_interruptible(TRAVEL_MS);
-            
-            if (kthread_should_stop())
-                return 0;
-            mutex_lock(&elevator.lock);
-            
-            if (elevator.current_floor < NUM_FLOORS)
-                elevator.current_floor++;
-            // New floor
-            elevator.state = LOADING;
-            mutex_unlock(&elevator.lock);
-            continue;
-        
-        
-        case DOWN:
-            mutex_unlock(&elevator.lock);
-            msleep_interruptible(TRAVEL_MS);
-            
-            if (kthread_should_stop())
-                return 0;
-            mutex_lock(&elevator.lock);
-            
-            if (elevator.current_floor > 1)
-                elevator.current_floor--;
-            // New floor
-            elevator.state = LOADING;
-            mutex_unlock(&elevator.lock);
-            continue;
-        
-        default:
-            elevator.state = IDLE;
-            delay_ms = 100;
-            break;
+       // Wait for the start signal
+       if(elevator.state == OFFLINE) {
+           mutex_unlock(&elevator.lock);
+           msleep(IDLE_POLL_MS);
+           continue;
        }
+
+       // Move one floor in the current direction
+       if (elevator.state == UP || elevator.state == DOWN) {
+           direction = (elevator.state == UP) ? 1 : -1;
+
+           // Release lock while moving
+           mutex_unlock(&elevator.lock);
+           msleep(TRAVEL_MS);
+           if (kthread_should_stop())
+               return 0;
+           mutex_lock(&elevator.lock);
+
+           // Keep elevator within floor 1-5
+           if( (direction > 0 && elevator.current_floor < NUM_FLOORS) ||
+                (direction < 0 && elevator.current_floor > 1 )) {
+               elevator.current_floor += direction;
+           }
+
+           elevator.state = IDLE;
+           mutex_unlock(&elevator.lock);
+           continue;
+       }
+
+       // Unload first to free capacity
+       changed = unload_pets();
+
+       // Do not board more pets after a stop request
+       if (!elevator.stop_requested && board_pets())
+           changed = true;
+
+       // One sec for loading/unloading, required delay if pets enter/exit
+       if (changed) {
+           elevator.state = LOADING;
+           mutex_unlock(&elevator.lock);
+           msleep(LOADING_MS);
+           if (kthread_should_stop())
+               return 0;
+           mutex_lock(&elevator.lock);
+           elevator.state = IDLE;
+           mutex_unlock(&elevator.lock);
+           continue;
+       }
+
+       // Stop only when elevator is empty, pets waiting on floor remain in queues
+       if (elevator.stop_requested && list_empty(&elevator.onboard)) {
+           elevator.state = OFFLINE;
+           elevator.stop_requested = 0;
+           travel_direction = 0;
+           mutex_unlock(&elevator.lock);
+           continue;
+       }
+
+       // Remain idle if no requests exist
+       if (list_empty(&elevator.onboard) && elevator.total_waiting == 0) {
+           elevator.state = IDLE;
+           travel_direction = 0;
+           mutex_unlock(&elevator.lock);
+           msleep(IDLE_POLL_MS);
+           continue;
+       }
+
+       // Choose next floor using LOOK scheduling
+       target = choose_next_floor();
+
+       // Set direction towrd next stop
+       if (target > elevator.current_floor) {
+           travel_direction = 1;
+           elevator.state = UP;
+       } else if (target < elevator.current_floor) {
+           travel_direction = -1;
+           elevator.state = DOWN;
+       } else {
+           elevator.state = IDLE;
+       }
+
+       moving = target != elevator.current_floor;
        mutex_unlock(&elevator.lock);
-       msleep_interruptible(delay_ms);
+       if (!moving)
+           msleep(IDLE_POLL_MS);
    }
    return 0;
 }
 
 
+
 /* Stub implementations */
 
+// Start elevator
 int elevator_start(void)
 {
     mutex_lock(&elevator.lock);
 
-    /* if not OFFLINE, cannot start; return 1 */
+    // Prevent starting an already active elevator
     if (elevator.state != OFFLINE) {
-        //pr_info("elevator: start called, but state is %s (returning 1)\n",
-        //        get_state_string(elevator.state));
         mutex_unlock(&elevator.lock);
         return 1;
     }
 
-    elevator.current_floor = 1;
+    // Preserve queued pets from before start or after stop
+    elevator.current_weight = 0;
+    elevator.current_pets = 0;
+
+    travel_direction = 0;
     elevator.stop_requested = 0;
     elevator.state = IDLE;
-    //pr_info("elevator: started successfully. State: %s\n",
-    //        get_state_string(elevator.state));
 
     mutex_unlock(&elevator.lock);
     return 0;
@@ -303,13 +336,6 @@ int elevator_issue_request(int start_floor, int dest_floor, int type) {
     INIT_LIST_HEAD(&p->node);
     mutex_lock(&elevator.lock);
 
-    // Reject new requests while elevaotr is in process of stopping
-    if (elevator.stop_requested) {
-        mutex_unlock(&elevator.lock);
-        kfree(p);
-        return 1;
-    }
-
     // Add pet to end of waiting list of belonging to its start floor
     list_add_tail(&p->node, &elevator.waiting[start_floor - 1]);
 
@@ -321,23 +347,21 @@ int elevator_issue_request(int start_floor, int dest_floor, int type) {
 
 }
 
+// Request deactivation after all onboard pets are delivered
 int elevator_stop(void)
 {
     mutex_lock(&elevator.lock);
 
-    /* if already OFFLINE or stop already requested, return 1 */
-    if (elevator.state == OFFLINE || elevator.stop_requested) {
-        //pr_info("elevator: stop called, but state is %s / stop_req=%d (returning 1)\n",
-        //        get_state_string(elevator.state), elevator.stop_requested);
+    // Reject duplicate stop request
+    if (elevator.stop_requested) {
         mutex_unlock(&elevator.lock);
         return 1;
     }
 
-    elevator.stop_requested = 1;
-    /* without the thread loop running yet, transition to OFFLINE directly for testing */
-    //elevator.state = OFFLINE;
-    //pr_info("elevator: stop requested. State: %s\n",
-    //        get_state_string(elevator.state));
+    // Let thread finish delivering onboard pets
+    if (elevator.state != OFFLINE) {
+        elevator.stop_requested = 1;
+    }
 
     mutex_unlock(&elevator.lock);
     return 0;
@@ -345,11 +369,13 @@ int elevator_stop(void)
 
 /*PROCFS Operations */
 
+// Display elevator information in /proc/elevator
 static int elevator_proc_show(struct seq_file *m, void *v)
 {
     struct pet *p;
     int i;
 
+    // Lock shared data while reading info
     mutex_lock(&elevator.lock);
 
     seq_printf(m, "Elevator state: %s\n", get_state_string(elevator.state));
@@ -380,6 +406,7 @@ static int elevator_proc_show(struct seq_file *m, void *v)
     return 0;
 }
 
+// Open the proc file
 static int elevator_proc_open(struct inode *inode, struct file *file)
 {
     return single_open(file, elevator_proc_show, NULL);
@@ -399,18 +426,21 @@ static void free_pets(struct list_head *head) {
     struct pet *p;
     struct pet *tmp;
 
+    // Remve and free each remaining pet
     list_for_each_entry_safe(p, tmp, head, node) {
         list_del(&p->node);
         kfree(p);
     }
 }
 
+// Initialize the elevator module
 static int __init elevator_init(void)
 {
     int i;
 
     mutex_init(&elevator.lock);
 
+    // Set the intial elevator state and info
     elevator.state = OFFLINE;
     elevator.current_floor = 1;
     elevator.current_weight = 0;
@@ -418,22 +448,18 @@ static int __init elevator_init(void)
 
     elevator.total_pets_serviced = 0;
     elevator.total_waiting = 0;
-    //elevator.total_weight_serviced = 0;
     elevator.stop_requested = 0;
     elevator.thread = NULL;
+    travel_direction = 0;
     INIT_LIST_HEAD(&elevator.onboard);
 
+    // Init the onboard and floor linked lists
     for (i = 0; i < NUM_FLOORS; i++){
         INIT_LIST_HEAD(&elevator.waiting[i]);
         elevator.floor_wait_count[i] = 0;
     }
-
-    /* register /proc/elevator */
-    //if (!proc_create(ENTRY_NAME, PERMS, NULL, &elevator_proc_ops)) {
-    //    pr_err("elevator: failed to create /proc/%s\n", ENTRY_NAME);
-    //    return -ENOMEM;
-    //}
-
+   
+    // Create the /proc/elevator entry
     elevator_entry = proc_create(ENTRY_NAME, PERMS, NULL, &elevator_proc_ops);
     if (!elevator_entry) {
         mutex_destroy(&elevator.lock);
@@ -453,18 +479,18 @@ static int __init elevator_init(void)
 
     /* hook the start and stop stubs */
     STUB_start_elevator = elevator_start;
-    STUB_stop_elevator  = elevator_stop;
     STUB_issue_request  = elevator_issue_request;
+    STUB_stop_elevator  = elevator_stop;
 
-    //pr_info("elevator: module loaded. State: %s\n",
-    //        get_state_string(elevator.state));
-    pr_info("elevator: module loaded\n");
     return 0;
 }
 
+// Remove the elevator module
 static void __exit elevator_exit(void)
 {
-    /* clear stubs so syscalls return -ENOSYS */
+    int i;
+
+    /* Disconnect system call pointers */
     STUB_start_elevator = NULL;
     STUB_stop_elevator  = NULL;
     STUB_issue_request  = NULL;
@@ -475,16 +501,15 @@ static void __exit elevator_exit(void)
     
     proc_remove(elevator_entry);
     mutex_lock(&elevator.lock);
+    
     // Free pets inside elevator
     free_pets(&elevator.onboard);
+    
     // Free pets still waiting on floor
-    for (int i = 0; i < NUM_FLOORS; i++)
+    for (i = 0; i < NUM_FLOORS; i++)
         free_pets(&elevator.waiting[i]);
     mutex_unlock(&elevator.lock);
-
     mutex_destroy(&elevator.lock);
-
-    pr_info("elevator: module unloaded\n");
 }
 
 module_init(elevator_init);
